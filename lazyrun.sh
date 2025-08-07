@@ -173,102 +173,139 @@ run_command_background() {
     
     # 在子shell中运行命令，使用nohup确保shell关闭后仍能运行
     export OSTYPE  # 显式导出OSTYPE变量，确保子shell可用
-    nohup bash -c '
-        set -e
-        # 设置陷阱处理信号
-        trap "exit 130" INT
-        trap "exit 143" TERM
-        
-        # 记录PID和任务信息
-        echo $$ > "'"$pid_file"'"
-        
-        # 实时写入日志开始标记
-        echo ">>> 命令开始执行: $(date \"+%Y-%m-%d %H:%M:%S\")" >> "'"$log_file"'"
-        
-        # 使用 eval 执行命令，实时写入日志
-        if eval "'"$cmd"'" >> "'"$log_file"'" 2>&1; then
-            exit_code=0
-        else
-            exit_code=$?
-        fi
-        
-        end_time=$(date +%s)
-        duration=$((end_time - '"$start_time"'))
-        
-        # 计算运行时间
-        hours=$((duration / 3600))
-        minutes=$(((duration % 3600) / 60))
-        seconds=$((duration % 60))
-        
-        if [ $hours -gt 0 ]; then
-            duration_text="${hours}小时${minutes}分钟${seconds}秒"
-        elif [ $minutes -gt 0 ]; then
-            duration_text="${minutes}分钟${seconds}秒"
-        else
-            duration_text="${seconds}秒"
-        fi
-        
-        
-        # 检查是否跨天运行，如果跨天则创建符号链接
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            end_year=$(date -r $end_time +%Y 2>/dev/null)
-            end_month=$(date -r $end_time +%m 2>/dev/null)  
-            end_day=$(date -r $end_time +%d 2>/dev/null)
-        else
-            end_year=$(date -d "@$end_time" +%Y 2>/dev/null)
-            end_month=$(date -d "@$end_time" +%m 2>/dev/null)
-            end_day=$(date -d "@$end_time" +%d 2>/dev/null)
-        fi
-        
-        # 如果结束日期与开始日期不同，在结束日期目录创建符号链接
-        if [ "$end_year" != "'"$year"'" ] || [ "$end_month" != "'"$month"'" ] || [ "$end_day" != "'"$day"'" ]; then
-            end_log_dir="'"$LAZYRUN_LOG_DIR"'/$end_year/$end_month/$end_day"
-            mkdir -p "$end_log_dir"
-            link_name="'"${final_log_name}"'_crossday.log"
-            ln -sf "'"$log_file"'" "$end_log_dir/$link_name" 2>/dev/null
-            echo ">>> 跨天运行检测: 在 $end_year/$end_month/$end_day 创建日志链接" >> "'"$log_file"'"
-        fi
-        
-        # 实时写入完成信息
-        {
-            echo ""
-            echo ">>> 命令执行完成: $(date \"+%Y-%m-%d %H:%M:%S\")"
-            echo ">>> 运行时长: $duration_text"
-            echo ">>> 退出代码: $exit_code"
-            echo "================================================================================"
-        } >> "'"$log_file"'"
-        
-        
-        # 检查是否需要发送通知
-        if [ $duration -ge '"$MIN_RUN_TIME"' ]; then
-            if [ $exit_code -eq 0 ]; then
-                status_text="✅ 成功完成"
-            else
-                status_text="❌ 执行失败 (退出码: $exit_code)"
-            fi
-            
-            notification_title="LazyRun 任务完成: '"$final_log_name"'"
-            notification_content="任务名称: '"$final_log_name"'
-运行命令: '"$cmd"'
+    
+    # 创建临时脚本文件来避免复杂的引号嵌套
+    local temp_script=$(mktemp)
+    cat > "$temp_script" << 'SCRIPT_EOF'
+set -e
+# 设置陷阱处理信号
+trap "exit 130" INT
+trap "exit 143" TERM
+
+# 记录PID和任务信息
+echo $$ > "$TASK_PID_FILE"
+
+# 实时写入日志开始标记
+echo ">>> 命令开始执行: $(date '+%Y-%m-%d %H:%M:%S')" >> "$TASK_LOG_FILE"
+
+# 使用 eval 执行命令，实时写入日志
+if eval "$TASK_COMMAND" >> "$TASK_LOG_FILE" 2>&1; then
+    exit_code=0
+else
+    exit_code=$?
+fi
+
+end_time=$(date +%s)
+duration=$((end_time - TASK_START_TIME))
+
+# 计算运行时间
+hours=$((duration / 3600))
+minutes=$(((duration % 3600) / 60))
+seconds=$((duration % 60))
+
+if [ $hours -gt 0 ]; then
+    duration_text="${hours}小时${minutes}分钟${seconds}秒"
+elif [ $minutes -gt 0 ]; then
+    duration_text="${minutes}分钟${seconds}秒"
+else
+    duration_text="${seconds}秒"
+fi
+
+# 检查是否跨天运行，如果跨天则创建符号链接
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    end_year=$(date -r $end_time +%Y 2>/dev/null)
+    end_month=$(date -r $end_time +%m 2>/dev/null)  
+    end_day=$(date -r $end_time +%d 2>/dev/null)
+else
+    end_year=$(date -d "@$end_time" +%Y 2>/dev/null)
+    end_month=$(date -d "@$end_time" +%m 2>/dev/null)
+    end_day=$(date -d "@$end_time" +%d 2>/dev/null)
+fi
+
+# 如果结束日期与开始日期不同，在结束日期目录创建符号链接
+if [ "$end_year" != "$TASK_YEAR" ] || [ "$end_month" != "$TASK_MONTH" ] || [ "$end_day" != "$TASK_DAY" ]; then
+    end_log_dir="$TASK_LOG_DIR/$end_year/$end_month/$end_day"
+    mkdir -p "$end_log_dir"
+    link_name="${TASK_FINAL_NAME}_crossday.log"
+    ln -sf "$TASK_LOG_FILE" "$end_log_dir/$link_name" 2>/dev/null
+    echo ">>> 跨天运行检测: 在 $end_year/$end_month/$end_day 创建日志链接" >> "$TASK_LOG_FILE"
+fi
+
+# 实时写入完成信息
+{
+    echo ""
+    echo ">>> 命令执行完成: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo ">>> 运行时长: $duration_text"
+    echo ">>> 退出代码: $exit_code"
+    echo "================================================================================"
+} >> "$TASK_LOG_FILE"
+
+# 检查是否需要发送通知
+if [ $duration -ge $TASK_MIN_RUN_TIME ]; then
+    if [ $exit_code -eq 0 ]; then
+        status_text="✅ 成功完成"
+    else
+        status_text="❌ 执行失败 (退出码: $exit_code)"
+    fi
+    
+    notification_title="LazyRun 任务完成: $TASK_FINAL_NAME"
+    notification_content="任务名称: $TASK_FINAL_NAME
+运行命令: $TASK_COMMAND
 执行状态: $status_text
 运行时长: $duration_text
-完成时间: $(date \"+%Y-%m-%d %H:%M:%S\")
-日志文件: '"$log_file"'"
-            # 如果设置了PUSHPLUS_TOKEN，发送通知
-            if [ -n "'"$PUSHPLUS_TOKEN"'" ]; then
-                send_pushplus_notification "$notification_title" "$notification_content" "'"$PUSHPLUS_TOKEN"'"
-                echo ">>> 推送通知已发送" >> "'"$log_file"'"
-            fi
-            fi
+完成时间: $(date '+%Y-%m-%d %H:%M:%S')
+日志文件: $TASK_LOG_FILE"
+    
+    # 如果设置了PUSHPLUS_TOKEN，发送通知
+    if [ -n "$TASK_PUSHPLUS_TOKEN" ]; then
+        # 构建JSON数据
+        json_data=$(cat << EOF
+{
+    "token": "$TASK_PUSHPLUS_TOKEN",
+    "title": "$TASK_PUSHTITLE",
+    "content": "$notification_content",
+}
+EOF
+)
+        # 使用 curl 发送推送（兼容性最好）
+        response=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "$json_data" \
+            "http://www.pushplus.plus/send" 2>/dev/null)
+        
+        if [ $? -eq 0 ]; then
+            echo ">>> 推送通知已发送: $response" >> "$TASK_LOG_FILE"
         else
-            echo ">>> 任务运行时间少于5分钟，跳过推送通知" >> "'"$log_file"'"
+            echo ">>> 推送通知发送失败" >> "$TASK_LOG_FILE"
         fi
-        
-        # 清理PID文件
-        rm -f "'"$pid_file"'"
-        
-        exit $exit_code
-    ' > /dev/null 2>&1 &
+    fi
+else
+    echo ">>> 任务运行时间少于5分钟，跳过推送通知" >> "$TASK_LOG_FILE"
+fi
+
+# 清理PID文件和临时脚本
+rm -f "$TASK_PID_FILE"
+rm -f "$0"  # 删除临时脚本文件
+
+exit $exit_code
+SCRIPT_EOF
+    
+    # 设置环境变量供脚本使用
+    export TASK_PID_FILE="$pid_file"
+    export TASK_LOG_FILE="$log_file"
+    export TASK_COMMAND="$cmd"
+    export TASK_START_TIME="$start_time"
+    export TASK_YEAR="$year"
+    export TASK_MONTH="$month"
+    export TASK_DAY="$day"
+    export TASK_LOG_DIR="$LAZYRUN_LOG_DIR"
+    export TASK_FINAL_NAME="$final_log_name"
+    export TASK_MIN_RUN_TIME="$MIN_RUN_TIME"
+    export TASK_PUSHPLUS_TOKEN="$PUSHPLUS_TOKEN"
+    export TASK_PUSHTITLE="$PUSHTITLE"
+    
+    # 使用nohup执行临时脚本
+    nohup bash "$temp_script" >/dev/null 2>&1 &
     
     local bg_pid=$!
     echo "🆔 后台进程PID: $bg_pid"
