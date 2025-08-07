@@ -10,7 +10,7 @@
 LAZYRUN_LOG_DIR="${HOME}/.lazyrun/logs"
 LAZYRUN_PID_DIR="${HOME}/.lazyrun/pids"
 PUSHPLUS_TOKEN="${PUSHPLUS_TOKEN:-}"  # 从环境变量获取，或手动设置
-MIN_RUN_TIME=300  # 5分钟 = 300秒
+MIN_RUN_TIME="${MIN_RUN_TIME:-300}"  # 5分钟 = 300秒，可通过环境变量自定义
 PUSHTITLE="${PUSHTITLE:-LazyRun任务通知}"
 DEFAULT_SEARCH_DAYS=30  # 默认搜索天数
 MAX_SEARCH_DAYS=90      # 最大搜索天数
@@ -172,7 +172,9 @@ run_command_background() {
     } > "$log_file"
     
     # 在子shell中运行命令，使用nohup确保shell关闭后仍能运行
+    export OSTYPE  # 显式导出OSTYPE变量，确保子shell可用
     nohup bash -c '
+        set -e
         # 设置陷阱处理信号
         trap "exit 130" INT
         trap "exit 143" TERM
@@ -252,12 +254,11 @@ run_command_background() {
 运行时长: $duration_text
 完成时间: $(date \"+%Y-%m-%d %H:%M:%S\")
 日志文件: '"$log_file"'"
-            
             # 如果设置了PUSHPLUS_TOKEN，发送通知
             if [ -n "'"$PUSHPLUS_TOKEN"'" ]; then
-                json_data="{\"token\": \"'"$PUSHPLUS_TOKEN"'\", \"title\": \"'"$PUSHTITLE"'\", \"content\": \"$notification_content\"}"
-                curl -s -X POST -H "Content-Type: application/json" -d "$json_data" "http://www.pushplus.plus/send" > /dev/null 2>&1
+                send_pushplus_notification "$notification_title" "$notification_content" "'"$PUSHPLUS_TOKEN"'"
                 echo ">>> 推送通知已发送" >> "'"$log_file"'"
+            fi
             fi
         else
             echo ">>> 任务运行时间少于5分钟，跳过推送通知" >> "'"$log_file"'"
