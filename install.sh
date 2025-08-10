@@ -202,8 +202,8 @@ lazyclean() {
 _lazyrun_completion() {
     local cur prev opts
     COMPREPLY=()
-    cur="${COMP_WORDS[COMP_WORDS_INDEX]}"
-    prev="${COMP_WORDS[COMP_WORDS_INDEX-1]}"
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
     
     opts="--help --list --kill --kill-all --log --logs"
     
@@ -230,7 +230,7 @@ _lazyrun_completion() {
         return 0
     fi
     
-    if [ "${COMP_WORDS[COMP_WORDS_INDEX-2]}" = "--log" ]; then
+    if [ "${COMP_WORDS[COMP_CWORD-2]}" = "--log" ]; then
         local log_modes="tail head cat follow"
         COMPREPLY=( $(compgen -W "${log_modes}" -- ${cur}) )
         return 0
@@ -248,7 +248,7 @@ fi
 _lazykill_completion() {
     local cur
     COMPREPLY=()
-    cur="${COMP_WORDS[COMP_WORDS_INDEX]}"
+    cur="${COMP_WORDS[COMP_CWORD]}"
     
     local job_names
     if [ -f "$HOME/.lazyrun/pids/active_jobs" ]; then
@@ -260,17 +260,17 @@ _lazykill_completion() {
 _lazylog_completion() {
     local cur prev
     COMPREPLY=()
-    cur="${COMP_WORDS[COMP_WORDS_INDEX]}"
-    prev="${COMP_WORDS[COMP_WORDS_INDEX-1]}"
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
     
-    if [ ${COMP_WORDS_INDEX} -eq 1 ]; then
+    if [ ${COMP_CWORD} -eq 1 ]; then
         # 第一个参数: 任务名补全
         local all_job_names
         if [ -d "$HOME/.lazyrun/logs" ]; then
             all_job_names=$(ls -1 "$HOME/.lazyrun/logs" 2>/dev/null | grep -v '\.log$')
             COMPREPLY=( $(compgen -W "${all_job_names}" -- ${cur}) )
         fi
-    elif [ ${COMP_WORDS_INDEX} -eq 2 ]; then
+    elif [ ${COMP_CWORD} -eq 2 ]; then
         # 第二个参数: 日志模式补全
         local log_modes="tail head cat follow"
         COMPREPLY=( $(compgen -W "${log_modes}" -- ${cur}) )
