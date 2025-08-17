@@ -10,7 +10,37 @@ print_color() {
     local color=$1
     local message=$2
     case $color in
-        red)    echo -e "\033[31m$message\033[0m" ;;
+        red)    echo -e "\033[31}
+
+lazylogs() {
+    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
+    source "$lazyrun_script"
+    list_all_logs
+}
+
+lazylog() {
+    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
+    source "$lazyrun_script"
+    view_job_log "$@"
+}
+
+lazylogfol() {
+    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
+    source "$lazyrun_script"
+    view_job_log "$1" follow
+}
+
+lazykill() {
+    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
+    source "$lazyrun_script"
+    kill_job "$@"
+}
+
+lazykillall() {
+    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
+    source "$lazyrun_script"
+    kill_job -a
+}[0m" ;;
         green)  echo -e "\033[32m$message\033[0m" ;;
         yellow) echo -e "\033[33m$message\033[0m" ;;
         blue)   echo -e "\033[36m$message\033[0m" ;;
@@ -93,6 +123,15 @@ install_lazyrun() {
     cp "./lazyrun.sh" "$install_dir/bin/"
     chmod +x "$install_dir/bin/lazyrun.sh"
     
+    # 复制自动补全脚本
+    if [ -f "./lazyrun_completion.sh" ]; then
+        cp "./lazyrun_completion.sh" "$install_dir/bin/"
+        chmod +x "$install_dir/bin/lazyrun_completion.sh"
+        print_color green "✓ 自动补全脚本已安装"
+    else
+        print_color yellow "⚠️  未找到自动补全脚本 lazyrun_completion.sh"
+    fi
+    
     # 检测 shell 和配置文件
     local shell_name
     local config_file
@@ -110,15 +149,20 @@ install_lazyrun() {
             print_color yellow "⚠️  LazyRun 似乎已经安装，正在更新..."
         fi
         
-        # 备份配置文件
-        cp "$config_file" "${config_file}.lazyrun.backup.$(date +%Y%m%d_%H%M%S)"
-        print_color green "✓ 配置文件已备份"
+        # 删除上一次安装时的备份文件
+        rm -f "${config_file}".lazyrun_install.bak
+        
+        # 备份配置文件 (使用新的命名规则)
+        cp "$config_file" "${config_file}.lazyrun_install.bak"
+        print_color green "✓ 配置文件已备份为 ${config_file}.lazyrun_install.bak"
         
         # 移除旧的配置
         sed -i.tmp '/# LazyRun Function/,/# End of LazyRun/d' "$config_file"
         rm -f "${config_file}.tmp"
     elif [ "$force_install" = "true" ]; then
         print_color blue "🔄 强制重装模式，但未发现现有安装，执行全新安装..."
+        # 删除可能存在的旧备份文件
+        rm -f "${config_file}".lazyrun_install.bak
     fi
     
     # 添加函数到配置文件
@@ -147,13 +191,7 @@ lazyrun() {
 lazylist() {
     local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
     source "$lazyrun_script"
-    list_active_jobs
-}
-
-lazylogs() {
-    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
-    source "$lazyrun_script"
-    list_all_logs
+    list_active_jobs "$@"
 }
 
 lazylog() {
@@ -162,28 +200,10 @@ lazylog() {
     view_job_log "$@"
 }
 
-lazylogfol() {
-    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
-    source "$lazyrun_script"
-    view_job_log "$1" follow
-}
-
 lazykill() {
     local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
     source "$lazyrun_script"
     kill_job "$@"
-}
-
-lazykillall() {
-    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
-    source "$lazyrun_script"
-    kill_all_jobs
-}
-
-lazyhelp() {
-    local lazyrun_script="$HOME/.lazyrun/bin/lazyrun.sh"
-    source "$lazyrun_script"
-    show_help
 }
 
 lazypush() {
@@ -199,43 +219,11 @@ lazyclean() {
 }
 
 # LazyRun 自动补全
-_lazyrun_completion() {
-    local cur prev opts
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    
-    opts="--help --list --kill --kill-all --log --logs"
-    
-    if [[ ${cur} == --* ]] ; then
-        COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
-        return 0
-    fi
-    
-    if [[ ${prev} == "--kill" ]] ; then
-        local job_names
-        if [ -f "$HOME/.lazyrun/pids/active_jobs" ]; then
-            job_names=$(awk -F':' '{print $2}' "$HOME/.lazyrun/pids/active_jobs" 2>/dev/null)
-            COMPREPLY=( $(compgen -W "${job_names}" -- ${cur}) )
-        fi
-        return 0
-    fi
-    
-    if [[ ${prev} == "--log" ]] ; then
-        local all_job_names
-        if [ -d "$HOME/.lazyrun/logs" ]; then
-            all_job_names=$(ls -1 "$HOME/.lazyrun/logs" 2>/dev/null | grep -v '\.log$')
-            COMPREPLY=( $(compgen -W "${all_job_names}" -- ${cur}) )
-        fi
-        return 0
-    fi
-    
-    if [ "${COMP_WORDS[COMP_CWORD-2]}" = "--log" ]; then
-        local log_modes="tail head cat follow"
-        COMPREPLY=( $(compgen -W "${log_modes}" -- ${cur}) )
-        return 0
-    fi
-}
+if [ -f "$HOME/.lazyrun/bin/lazyrun_completion.sh" ]; then
+    source "$HOME/.lazyrun/bin/lazyrun_completion.sh"
+fi
+
+# End of LazyRun
 
 # 注册自动补全
 if [ -n "${BASH_VERSION}" ]; then

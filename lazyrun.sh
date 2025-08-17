@@ -2,9 +2,16 @@
 
 # lazyrun - 智能后台任务管理器
 # 作者: Ray, GitHub Copilot  
-# 版本: 2.0
+# 版本: 3.0
 # 兼容: Linux, macOS
-# 新特性: 三级目录结构，智能匹配，时间范围查询
+# 新特性: 智能命名，模块化设计，实时监控，标准化参数
+
+# 确保调试模式关闭
+set +x 2>/dev/null || true
+
+# 版本信息
+LAZYRUN_VERSION="3.0"
+LAZYRUN_BUILD_DATE="2025-08-17"
 
 # 配置变量
 LAZYRUN_LOG_DIR="${HOME}/.lazyrun/logs"
@@ -109,18 +116,77 @@ EOF
     fi
 }
 
-# 生成任务简称
+# 生成任务简称 - 改进版本
+generate_task_name() {
+    local cmd="$1"
+    local first_arg=$(echo "$cmd" | awk '{print $1}')
+    local second_arg=$(echo "$cmd" | awk '{print $2}')
+    local base_name=""
+    
+    # 如果第一个参数是解释器（python, node等），使用第二个参数
+    case "$first_arg" in
+        python|python3|node|php|ruby|perl|bash|sh|zsh)
+            if [ -n "$second_arg" ]; then
+                local filename=$(basename "$second_arg")
+                # 针对不同文件类型的处理
+                case "$filename" in
+                    *.py) base_name="${filename%.py}" ;;
+                    *.js) base_name="${filename%.js}" ;;
+                    *.php) base_name="${filename%.php}" ;;
+                    *.rb) base_name="${filename%.rb}" ;;
+                    *.pl) base_name="${filename%.pl}" ;;
+                    *.sh) base_name="${filename%.sh}" ;;
+                    ./*)
+                        local clean_name="${filename#./}"
+                        base_name="${clean_name%.*}"
+                        ;;
+                    *) base_name="${filename%.*}" ;;
+                esac
+            else
+                base_name="$first_arg"
+            fi
+            ;;
+        *)
+            # 直接执行的文件
+            local filename=$(basename "$first_arg")
+            case "$filename" in
+                *.sh) base_name="${filename%.sh}" ;;
+                *.py) base_name="${filename%.py}" ;;
+                *.js) base_name="${filename%.js}" ;;
+                *.pl) base_name="${filename%.pl}" ;;
+                *.rb) base_name="${filename%.rb}" ;;
+                *.php) base_name="${filename%.php}" ;;
+                ./*)
+                    local clean_name="${filename#./}"
+                    base_name="${clean_name%.*}"
+                    ;;
+                *) base_name="${filename%.*}" ;;
+            esac
+            ;;
+    esac
+    
+    # 如果base_name为空或者只有特殊字符，使用默认名称
+    if [ -z "$base_name" ] || [[ "$base_name" =~ ^[^a-zA-Z0-9_]+$ ]]; then
+        base_name="task"
+    fi
+    
+    # 清理非法字符，但保留更多有用字符
+    base_name=$(echo "$base_name" | sed -E 's/[^a-zA-Z0-9_-]+/_/g; s/^_+|_+$//g')
+    
+    # 确保不为空
+    if [ -z "$base_name" ]; then
+        base_name="task"
+    fi
+    
+    echo "$base_name"
+}
+
 # 后台运行函数
 run_command_background() {
     local cmd="$1"
     
-    # 生成任务基础名称（程序简称）
-    local base_name=$(echo "$cmd" | awk '{print $1}' | sed 's/[^a-zA-Z0-9_]/_/g')
-    if [ -z "$base_name" ] || [ "$base_name" = "_" ]; then
-        base_name="task"
-    fi
-    base_name=$(basename "$base_name")
-    base_name="${base_name%.*}"
+    # 使用新的任务名称生成函数
+    local base_name=$(generate_task_name "$cmd")
     
     # 创建三级目录结构：年/月/日
     local year=$(date +%Y)
@@ -243,15 +309,15 @@ fi
 # 检查是否需要发送通知
 if [ $duration -ge $TASK_MIN_RUN_TIME ]; then
     if [ $exit_code -eq 0 ]; then
-        status_text="✅ 成功完成"
+        task_status_text="✅ 成功完成"
     else
-        status_text="❌ 执行失败 (退出码: $exit_code)"
+        task_status_text="❌ 执行失败 (退出码: $exit_code)"
     fi
     
     notification_title="LazyRun 任务完成: $TASK_FINAL_NAME"
     notification_content="任务名称: $TASK_FINAL_NAME
 运行命令: $TASK_COMMAND
-执行状态: $status_text
+执行状态: $task_status_text
 运行时长: $duration_text
 完成时间: $(date '+%Y-%m-%d %H:%M:%S')
 日志文件: $TASK_LOG_FILE"
@@ -313,33 +379,319 @@ SCRIPT_EOF
     echo ""
 }
 
-# 列出活跃任务
+# 列出活跃任务 - 支持实时监控和详细显示
 list_active_jobs() {
-    local active_file="$LAZYRUN_PID_DIR/active_jobs"
+    local follow_mode=false
+    local show_help=false
+    local refresh_interval=3
     
-    if [ ! -f "$active_file" ]; then
-        print_color yellow "没有找到活跃的任务"
-        return
+    # 解析参数
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -f|--follow)
+                follow_mode=true
+                shift
+                ;;
+            -i|--interval)
+                if [ -n "$2" ] && [ "$2" -gt 0 ] 2>/dev/null; then
+                    refresh_interval="$2"
+                    shift 2
+                else
+                    print_color red "错误: 刷新间隔必须是正整数"
+                    return 1
+                fi
+                ;;
+            -h|--help)
+                show_help=true
+                shift
+                ;;
+            *)
+                print_color red "错误: 未知参数 '$1'"
+                show_help=true
+                shift
+                ;;
+        esac
+    done
+    
+    # 显示帮助信息
+    if [ "$show_help" = true ]; then
+        cat << 'EOF'
+lazylist - 显示LazyRun任务状态
+
+用法: lazylist [选项]
+
+选项:
+  -f, --follow         实时监控任务状态
+  -i, --interval NUM   设置刷新间隔(秒，默认3秒)
+  -h, --help           显示此帮助信息
+
+示例:
+  lazylist             显示当前活跃任务
+  lazylist -f          实时监控任务(3秒刷新)
+  lazylist -f -i 5     实时监控任务(5秒刷新)
+EOF
+        return 0
     fi
     
-    print_color blue "🔄 活跃的 LazyRun 任务:"
-    printf "%-15s %-10s %-20s %-15s %-25s\n" "任务名称" "PID" "开始时间" "运行时长" "完整ID"
-    echo "--------------------------------------------------------------------------------"
+    # 检测操作系统类型，提高跨平台兼容性
+    detect_os() {
+        case "$(uname -s)" in
+            Darwin*)    echo "macos" ;;
+            Linux*)     echo "linux" ;;
+            CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
+            FreeBSD*)   echo "freebsd" ;;
+            NetBSD*)    echo "netbsd" ;;
+            OpenBSD*)   echo "openbsd" ;;
+            *)          echo "unknown" ;;
+        esac
+    }
     
-    # 清理已完成的任务
-    local temp_file=$(mktemp)
-    
-    while IFS=':' read -r pid job_name start_time base_name; do
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            # 进程仍在运行
-            local current_time=$(get_timestamp)
-            local duration=$(calculate_duration $start_time $current_time)
-            printf "%-15s %-10s %-20s %-15s %-25s\n" "$job_name" "$pid" "$(format_time $start_time)" "$duration" "$base_name"
-            echo "$pid:$job_name:$start_time:$base_name" >> "$temp_file"
+    # 获取进程信息 - 改进的跨平台兼容性
+    get_process_info() {
+        local pid="$1"
+        local os_type
+        local result
+        
+        # 检查进程是否存在
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "N/A:N/A:已停止"
+            return 1
         fi
-    done < "$active_file"
+        
+        os_type=$(detect_os)
+        
+        case "$os_type" in
+            "macos")
+                # macOS 使用不同的 ps 参数格式，更安全的处理方式
+                result=$(ps -p "$pid" -o pcpu=,pmem=,state= 2>/dev/null | head -1 | awk '
+                    {
+                        cpu = ($1 == "" || $1 == 0) ? "0.0" : $1
+                        mem = ($2 == "" || $2 == 0) ? "0.0" : $2
+                        state = ($3 == "") ? "R" : $3
+                        
+                        # 清理数值并确保格式
+                        gsub(/[^0-9.]/, "", cpu)
+                        gsub(/[^0-9.]/, "", mem) 
+                        if (cpu == "") cpu = "0.0"
+                        if (mem == "") mem = "0.0"
+                        
+                        printf "%s%%:%s%%:%s", cpu, mem, state
+                    }
+                ')
+                ;;
+            "linux"|"freebsd"|"netbsd"|"openbsd")
+                # Linux 和 BSD 系统，更安全的处理方式
+                result=$(ps -p "$pid" -o pcpu,pmem,stat --no-headers 2>/dev/null | head -1 | awk '
+                    {
+                        cpu = ($1 == "" || $1 == 0) ? "0.0" : $1
+                        mem = ($2 == "" || $2 == 0) ? "0.0" : $2
+                        state = ($3 == "") ? "R" : substr($3, 1, 1)
+                        
+                        # 清理数值并确保格式
+                        gsub(/[^0-9.]/, "", cpu)
+                        gsub(/[^0-9.]/, "", mem)
+                        if (cpu == "") cpu = "0.0"
+                        if (mem == "") mem = "0.0"
+                        
+                        printf "%s%%:%s%%:%s", cpu, mem, state
+                    }
+                ')
+                ;;
+            *)
+                # 未知系统，尝试基本的 ps 命令
+                if ps -p "$pid" >/dev/null 2>&1; then
+                    result="运行中:N/A:R"
+                else
+                    result="N/A:N/A:已停止"
+                fi
+                ;;
+        esac
+        
+        # 确保有结果输出
+        if [ -z "$result" ]; then
+            result="N/A:N/A:已停止"
+        fi
+        
+        echo "$result"
+    }
     
-    mv "$temp_file" "$active_file"
+    # 格式化进程状态为可读文本
+    format_process_state() {
+        case "$1" in
+            "R") echo "运行中" ;;
+            "S") echo "休眠" ;;
+            "D") echo "等待IO" ;;
+            "Z") echo "僵死" ;;
+            "T") echo "已停止" ;;
+            "I") echo "空闲" ;;
+            "已停止") echo "已停止" ;;
+            *) echo "$1" ;;
+        esac
+    }
+    
+    # 安全地截断文本，考虑中文字符
+    truncate_text() {
+        local text="$1"
+        local max_len="$2"
+        local suffix="..."
+        
+        # 简单的字符长度处理（不完美但兼容性好）
+        if [ ${#text} -le "$max_len" ]; then
+            echo "$text"
+        else
+            local keep_len=$((max_len - ${#suffix}))
+            echo "${text:0:$keep_len}$suffix"
+        fi
+    }
+    
+    # 显示任务列表的主函数
+    show_task_list() {
+        # 临时保存并关闭所有可能的调试选项
+        local old_set_state="$-"
+        set +x +v +e 2>/dev/null || true
+        
+        local active_file="$LAZYRUN_PID_DIR/active_jobs"
+        local temp_file
+        local has_active_jobs=false
+        local line_count=0
+        
+        if [ ! -f "$active_file" ]; then
+            print_color yellow "📭 没有找到活跃的任务"
+            return 1
+        fi
+        
+        # 创建临时文件，提高安全性
+        temp_file=$(mktemp "${TMPDIR:-/tmp}/lazyrun_jobs.XXXXXX" 2>/dev/null) || {
+            print_color red "错误: 无法创建临时文件"
+            return 1
+        }
+        
+        # 显示标题
+        print_color blue "🔄 LazyRun 活跃任务列表"
+        echo ""
+        
+        # 表格头部 - 优化布局，提高可读性
+        printf "┌─%-32s─┬─%-8s─┬─%-8s─┬─%-8s─┬─%-8s─┬─%-17s─┬─%-10s─┬─%-18s─┐\n" \
+            "$(printf '─%.0s' {1..32})" "$(printf '─%.0s' {1..8})" \
+            "$(printf '─%.0s' {1..8})" "$(printf '─%.0s' {1..8})" \
+            "$(printf '─%.0s' {1..8})" "$(printf '─%.0s' {1..17})" \
+            "$(printf '─%.0s' {1..10})" "$(printf '─%.0s' {1..18})"
+        
+        printf "│ %-32s │ %-8s │ %-8s │ %-8s │ %-8s │ %-17s │ %-10s │ %-18s │\n" \
+            "任务名称" "PID" "CPU%" "内存%" "状态" "开始时间" "运行时长" "程序名"
+        
+        printf "├─%-32s─┼─%-8s─┼─%-8s─┼─%-8s─┼─%-8s─┼─%-17s─┼─%-10s─┼─%-18s─┤\n" \
+            "$(printf '─%.0s' {1..32})" "$(printf '─%.0s' {1..8})" \
+            "$(printf '─%.0s' {1..8})" "$(printf '─%.0s' {1..8})" \
+            "$(printf '─%.0s' {1..8})" "$(printf '─%.0s' {1..17})" \
+            "$(printf '─%.0s' {1..10})" "$(printf '─%.0s' {1..18})"
+        
+        # 处理每个任务
+        {
+        while IFS=':' read -r pid job_name start_time base_name || [ -n "$pid" ]; do
+            # 严格校验字段完整性
+            if [ -z "$pid" ] || [ -z "$job_name" ] || [ -z "$start_time" ] || [ -z "$base_name" ]; then
+                continue
+            fi
+            
+            # 检查进程是否仍在运行
+            if kill -0 "$pid" 2>/dev/null; then
+                has_active_jobs=true
+                line_count=$((line_count + 1))
+                
+                # 计算运行时间 - 使用安全的变量赋值
+                local current_time duration formatted_time
+                current_time=$(get_timestamp 2>/dev/null)
+                duration=$(calculate_duration "$start_time" "$current_time" 2>/dev/null)
+                formatted_time=$(format_time "$start_time" 2>/dev/null || echo "未知时间")
+                
+                # 获取进程信息 - 使用安全的方式
+                local proc_info cpu_usage mem_usage proc_state display_state
+                proc_info=$(get_process_info "$pid" 2>/dev/null)
+                cpu_usage=$(echo "$proc_info" | cut -d':' -f1 2>/dev/null)
+                mem_usage=$(echo "$proc_info" | cut -d':' -f2 2>/dev/null)
+                proc_state=$(echo "$proc_info" | cut -d':' -f3 2>/dev/null)
+                display_state=$(format_process_state "$proc_state" 2>/dev/null)
+                
+                # 安全地截断显示文本
+                local display_job_name display_base_name
+                display_job_name=$(truncate_text "$job_name" 30)
+                display_base_name=$(truncate_text "$base_name" 16)
+                
+                # 格式化并输出行
+                printf "│ %-32s │ %-8s │ %-8s │ %-8s │ %-8s │ %-17s │ %-10s │ %-18s │\n" \
+                    "$display_job_name" "$pid" "$cpu_usage" "$mem_usage" "$display_state" \
+                    "${formatted_time:0:17}" "$duration" "$display_base_name"
+                
+                # 保存到临时文件
+                printf "%s:%s:%s:%s\n" "$pid" "$job_name" "$start_time" "$base_name" >> "$temp_file"
+            fi
+        done < "$active_file"
+        } 2>/dev/null
+        
+        # 表格底部
+        printf "└─%-32s─┴─%-8s─┴─%-8s─┴─%-8s─┴─%-8s─┴─%-17s─┴─%-10s─┴─%-18s─┘\n" \
+            "$(printf '─%.0s' {1..32})" "$(printf '─%.0s' {1..8})" \
+            "$(printf '─%.0s' {1..8})" "$(printf '─%.0s' {1..8})" \
+            "$(printf '─%.0s' {1..8})" "$(printf '─%.0s' {1..17})" \
+            "$(printf '─%.0s' {1..10})" "$(printf '─%.0s' {1..18})"
+        
+        # 显示统计信息
+        if [ "$has_active_jobs" = true ]; then
+            echo ""
+            print_color green "📊 共找到 $line_count 个活跃任务"
+            
+            # 更新活跃任务文件
+            if [ -s "$temp_file" ]; then
+                mv "$temp_file" "$active_file"
+            else
+                rm -f "$temp_file"
+            fi
+        else
+            print_color yellow "📭 所有任务已完成"
+            rm -f "$temp_file"
+        fi
+        
+        return 0
+    }
+    
+    # 信号处理，确保优雅退出
+    trap 'echo ""; print_color blue "👋 监控已停止"; exit 0' INT TERM
+    
+    # 主执行逻辑
+    if [ "$follow_mode" = true ]; then
+        print_color green "🚀 启动实时监控模式 (刷新间隔: ${refresh_interval}秒)"
+        echo ""
+        
+        # 持续监控循环
+        while true; do
+            # 清屏（仅在终端模式下）
+            if [ -t 1 ] && command -v clear >/dev/null 2>&1; then
+                clear
+            fi
+            
+            # 显示监控头部信息
+            print_color cyan "┌$(printf '─%.0s' {1..78})┐"
+            printf "│ 📊 LazyRun 实时监控 - %-50s │\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+            print_color cyan "└$(printf '─%.0s' {1..78})┘"
+            echo ""
+            
+            # 显示任务列表
+            if ! show_task_list; then
+                echo ""
+                print_color yellow "⏳ 等待任务启动..."
+            fi
+            
+            echo ""
+            print_color blue "🔄 下次更新: ${refresh_interval}秒后 (按 Ctrl+C 退出监控)"
+            
+            # 等待指定间隔
+            sleep "$refresh_interval"
+        done
+    else
+        # 单次显示模式
+        show_task_list
+    fi
 }
 
 # 智能匹配活跃任务（用于lazykill）
@@ -388,19 +740,23 @@ find_matching_job() {
     return 1
 }
 
-# 新的智能日志匹配函数（用于lazylog）
+# 新的智能日志匹配函数（用于lazylog）- 重写优化版本
 smart_log_search() {
     local search_term="$1"
     local max_days="${2:-$DEFAULT_SEARCH_DAYS}"
-    local is_full_name=false
     
-    # 判断是否包含日期时间格式（支持部分匹配）
-    if [[ "$search_term" =~ _[0-9]{8}(_[0-9]{1,6})?(_[0-9]+)?$ ]] || [[ "$search_term" =~ _[0-9]{4}[0-9]{2}[0-9]{2}_ ]]; then
-        is_full_name=true
+    # 输入验证
+    if [ -z "$search_term" ]; then
+        print_color red "错误: 搜索词不能为空" >&2
+        return 1
     fi
     
-    if [ "$is_full_name" = true ]; then
-        # 路径匹配模式：直接在目录结构中查找完整或部分文件名
+    # 判断搜索模式 - 使用更精确的匹配
+    if echo "$search_term" | grep -q '_[0-9]\{8\}_[0-9]\{6\}'; then
+        # 完整日志名模式：包含完整时间戳
+        path_based_log_search "$search_term"
+    elif echo "$search_term" | grep -q '_[0-9]\{8\}'; then
+        # 日期匹配模式：包含日期但可能不完整
         path_based_log_search "$search_term"
     else
         # 智能匹配模式：基于程序简称搜索
@@ -408,55 +764,95 @@ smart_log_search() {
     fi
 }
 
-# 路径匹配搜索（用于完整日志名）
+# 路径匹配搜索（用于完整日志名）- 重写优化版本
 path_based_log_search() {
     local search_term="$1"
     local found_files=()
     
-    # 从搜索词中提取日期信息（使用sed而不是正则表达式）
-    local date_part=$(echo "$search_term" | grep -o '_[0-9]\{8\}' | head -1)
-    if [ -n "$date_part" ]; then
-        # 提取年月日
-        local year=$(echo "$date_part" | cut -c2-5)
-        local month=$(echo "$date_part" | cut -c6-7)
-        local day=$(echo "$date_part" | cut -c8-9)
-        
+    # 使用更高效的日期提取方法
+    local date_part=""
+    if echo "$search_term" | grep -q '_[0-9]\{8\}'; then
+        date_part=$(echo "$search_term" | sed -n 's/.*_\([0-9]\{8\}\).*/\1/p' | head -1)
+    fi
+    
+    if [ -n "$date_part" ] && [ ${#date_part} -eq 8 ]; then
+        # 从日期字符串提取年月日
+        local year="${date_part:0:4}"
+        local month="${date_part:4:2}"
+        local day="${date_part:6:2}"
         local search_dir="$LAZYRUN_LOG_DIR/$year/$month/$day"
         
         if [ -d "$search_dir" ]; then
-            # 在指定日期目录中查找匹配的文件
-            local search_pattern="${search_dir}/${search_term}*.log"
-            for file in $search_pattern; do
-                if [ -f "$file" ]; then
-                    found_files+=("$file")
-                fi
-            done
-            
-            # 如果没找到完全匹配，尝试部分匹配
-            if [ ${#found_files[@]} -eq 0 ]; then
-                for file in "$search_dir"/*.log; do
-                    if [ -f "$file" ]; then
-                        local basename_file=$(basename "$file" .log)
-                        if [[ "$basename_file" == "${search_term}"* ]]; then
-                            found_files+=("$file")
-                        fi
-                    fi
-                done
-            fi
+            # 精确匹配和模糊匹配
+            _search_in_directory "$search_dir" "$search_term" found_files
         fi
     else
-        # 如果搜索词不包含日期，在所有目录中查找
-        for file in "$LAZYRUN_LOG_DIR"/*/*/*/*.log; do
-            if [ -f "$file" ]; then
-                local basename_file=$(basename "$file" .log)
-                if [[ "$basename_file" == "${search_term}"* ]]; then
-                    found_files+=("$file")
-                fi
-            fi
-        done
+        # 无日期信息，全局搜索（使用find优化性能）
+        _global_log_search "$search_term" found_files
     fi
     
-    # 根据匹配结果处理
+    # 处理搜索结果
+    _handle_search_results found_files[@]
+}
+
+# 在指定目录中搜索日志文件
+_search_in_directory() {
+    local search_dir="$1"
+    local search_term="$2"
+    local -n files_ref=$3
+    
+    # 精确匹配
+    if [ -f "${search_dir}/${search_term}.log" ]; then
+        files_ref+=("${search_dir}/${search_term}.log")
+        return
+    fi
+    
+    # 前缀匹配（使用find提高效率）
+    while IFS= read -r -d '' file; do
+        files_ref+=("$file")
+    done < <(find "$search_dir" -maxdepth 1 -name "${search_term}*.log" -type f -print0 2>/dev/null)
+    
+    # 如果还是没找到，尝试包含匹配
+    if [ ${#files_ref[@]} -eq 0 ]; then
+        while IFS= read -r -d '' file; do
+            local basename_file=$(basename "$file" .log)
+            if [ "${basename_file#*$search_term}" != "$basename_file" ]; then
+                files_ref+=("$file")
+            fi
+        done < <(find "$search_dir" -maxdepth 1 -name "*.log" -type f -print0 2>/dev/null)
+    fi
+}
+
+# 全局日志搜索
+_global_log_search() {
+    local search_term="$1"
+    local -n files_ref=$2
+    
+    # 使用find进行高效的全局搜索
+    while IFS= read -r -d '' file; do
+        files_ref+=("$file")
+    done < <(find "$LAZYRUN_LOG_DIR" -name "${search_term}*.log" -type f -print0 2>/dev/null | head -20)
+    
+    # 如果没找到前缀匹配，尝试包含匹配（限制结果数量）
+    if [ ${#files_ref[@]} -eq 0 ]; then
+        while IFS= read -r -d '' file; do
+            local basename_file=$(basename "$file" .log)
+            if [ "${basename_file#*$search_term}" != "$basename_file" ]; then
+                files_ref+=("$file")
+                # 限制结果数量避免性能问题
+                if [ ${#files_ref[@]} -ge 20 ]; then
+                    break
+                fi
+            fi
+        done < <(find "$LAZYRUN_LOG_DIR" -name "*.log" -type f -print0 2>/dev/null)
+    fi
+}
+
+# 处理搜索结果
+_handle_search_results() {
+    local -n files_ref=$1
+    local found_files=("${files_ref[@]}")
+    
     case ${#found_files[@]} in
         0)
             return 1
@@ -466,75 +862,99 @@ path_based_log_search() {
             return 0
             ;;
         *)
-            # 多个匹配，显示选择菜单
-            print_color yellow "找到 ${#found_files[@]} 个匹配的日志文件:" >&2
-            print_color blue "请选择要查看的日志文件:" >&2
-            
-            local i=1
-            for file in "${found_files[@]}"; do
-                local file_name=$(basename "$file")
-                local file_date=""
-                # 从路径中提取日期
-                file_date=$(echo "$file" | grep -o '/[0-9]\{4\}/[0-9]\{2\}/[0-9]\{2\}/' | tr -d '/' | sed 's/\(.*\)\(..\)\(..\)/\1-\2-\3/')
-                printf "  %d) %s (%s)\n" "$i" "$file_name" "$file_date" >&2
-                ((i++))
-            done
-            
-            if [ -t 0 ] && [ -t 2 ]; then
-                printf "请输入序号 (1-%d) 或 'q' 退出: " "${#found_files[@]}" >&2
-                local choice
-                read choice </dev/tty 2>/dev/null || choice="q"
-                
-                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#found_files[@]}" ]; then
-                    echo "${found_files[$((choice-1))]}"
-                    return 0
-                elif [ "$choice" = "q" ] || [ "$choice" = "Q" ]; then
-                    print_color yellow "用户取消选择" >&2
-                    return 1
-                else
-                    print_color red "无效的选择: $choice" >&2
-                    return 1
-                fi
-            else
-                print_color yellow "非交互式环境，自动选择最新的日志文件" >&2
-                # 按修改时间排序，选择最新的
-                local latest_file=$(ls -t "${found_files[@]}" 2>/dev/null | head -1)
-                if [ -n "$latest_file" ]; then
-                    echo "$latest_file"
-                    return 0
-                fi
-            fi
-            return 1
+            _show_file_selection_menu found_files[@]
+            return $?
             ;;
     esac
 }
 
-# 智能匹配搜索（用于程序简称）
+# 显示文件选择菜单
+_show_file_selection_menu() {
+    local -n files_ref=$1
+    local found_files=("${files_ref[@]}")
+    
+    print_color yellow "找到 ${#found_files[@]} 个匹配的日志文件:" >&2
+    print_color blue "请选择要查看的日志文件:" >&2
+    
+    # 按修改时间排序文件
+    local sorted_files=()
+    while IFS= read -r -d '' file; do
+        sorted_files+=("$file")
+    done < <(printf '%s\0' "${found_files[@]}" | xargs -0 ls -t 2>/dev/null | head -10 | tr '\n' '\0')
+    
+    # 显示选择菜单
+    local i=1
+    for file in "${sorted_files[@]}"; do
+        local file_name=$(basename "$file")
+        local file_date=""
+        # 跨平台的日期提取
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            file_date=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$file" 2>/dev/null || echo "未知")
+        else
+            file_date=$(stat -c %y "$file" 2>/dev/null | cut -d. -f1 || echo "未知")
+        fi
+        printf "  %d) %s (%s)\n" "$i" "$file_name" "$file_date" >&2
+        ((i++))
+        # 限制显示数量
+        if [ $i -gt 10 ]; then
+            print_color yellow "  ... 还有 $((${#found_files[@]} - 10)) 个文件未显示" >&2
+            break
+        fi
+    done
+    
+    # 交互式选择
+    if [ -t 0 ] && [ -t 2 ]; then
+        printf "请输入序号 (1-%d) 或 'q' 退出: " "${#sorted_files[@]}" >&2
+        local choice
+        read choice </dev/tty 2>/dev/null || choice="q"
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#sorted_files[@]}" ]; then
+            echo "${sorted_files[$((choice-1))]}"
+            return 0
+        elif [ "$choice" = "q" ] || [ "$choice" = "Q" ]; then
+            print_color yellow "用户取消选择" >&2
+            return 1
+        else
+            print_color red "无效的选择: $choice" >&2
+            return 1
+        fi
+    else
+        print_color yellow "非交互式环境，自动选择最新的日志文件" >&2
+        echo "${sorted_files[0]}"
+        return 0
+    fi
+}
+
+# 智能匹配搜索（用于程序简称）- 重写优化版本
 intelligent_log_search() {
     local base_name="$1"
     local max_days="$2"
     
+    # 输入验证
+    if [ -z "$base_name" ] || ! [[ "$max_days" =~ ^[0-9]+$ ]]; then
+        print_color red "错误: 无效的搜索参数" >&2
+        return 1
+    fi
+    
     # 从今天开始向前搜索，找到即停止
     for ((i=0; i<max_days; i++)); do
-        local year month day
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS
-            year=$(date -v-${i}d +%Y)
-            month=$(date -v-${i}d +%m)
-            day=$(date -v-${i}d +%d)
-        else
-            # Linux
-            year=$(date -d "$i days ago" +%Y)
-            month=$(date -d "$i days ago" +%m)
-            day=$(date -d "$i days ago" +%d)
+        local date_info
+        date_info=$(_get_date_offset "$i")
+        
+        if [ $? -ne 0 ] || [ -z "$date_info" ]; then
+            continue
         fi
+        
+        local year month day
+        IFS='|' read -r year month day <<< "$date_info"
         
         local search_dir="$LAZYRUN_LOG_DIR/$year/$month/$day"
         
         # 如果该日期目录存在，查找匹配的日志文件
         if [ -d "$search_dir" ]; then
-            # 查找最新的匹配文件（按修改时间排序）
-            local latest_file=$(ls -t "$search_dir"/${base_name}_*.log 2>/dev/null | head -1)
+            # 使用find进行高效搜索，按修改时间排序
+            local latest_file
+            latest_file=$(find "$search_dir" -name "${base_name}_*.log" -type f -exec ls -t {} + 2>/dev/null | head -1)
             
             if [ -n "$latest_file" ] && [ -f "$latest_file" ]; then
                 echo "$latest_file"
@@ -544,42 +964,131 @@ intelligent_log_search() {
     done
     
     # 如果在默认天数内没找到，询问用户是否继续搜索
-    if [ "$max_days" -eq "$DEFAULT_SEARCH_DAYS" ]; then
+    if [ "$max_days" -eq "$DEFAULT_SEARCH_DAYS" ] && [ -t 0 ] && [ -t 2 ]; then
         print_color yellow "在最近 $DEFAULT_SEARCH_DAYS 天内未找到匹配的日志" >&2
-        if [ -t 0 ] && [ -t 2 ]; then
-            printf "是否继续搜索更久远的日志？(y/N): " >&2
-            
-            # 简单的兼容性read，避免复杂的参数
-            local reply
-            read reply </dev/tty 2>/dev/null || reply="n"
-            
-            case "$reply" in
-                [Yy]|[Yy][Ee][Ss])
-                    intelligent_log_search "$base_name" "$MAX_SEARCH_DAYS"
-                    return $?
-                    ;;
-                *)
-                    return 1
-                    ;;
-            esac
-        else
-            print_color yellow "非交互式环境，跳过更久远日志搜索" >&2
-        fi
+        printf "是否继续搜索更久远的日志？(y/N): " >&2
+        
+        local reply
+        read reply </dev/tty 2>/dev/null || reply="n"
+        
+        case "$reply" in
+            [Yy]|[Yy][Ee][Ss])
+                intelligent_log_search "$base_name" "$MAX_SEARCH_DAYS"
+                return $?
+                ;;
+        esac
     fi
     
     return 1
 }
 
-# 终止任务
+# 跨平台日期计算函数
+_get_date_offset() {
+    local days_ago="$1"
+    
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS - 使用BSD date
+        local year month day
+        year=$(date -v-${days_ago}d +%Y 2>/dev/null) || return 1
+        month=$(date -v-${days_ago}d +%m 2>/dev/null) || return 1
+        day=$(date -v-${days_ago}d +%d 2>/dev/null) || return 1
+        echo "$year|$month|$day"
+    else
+        # Linux - 使用GNU date
+        local year month day
+        year=$(date -d "$days_ago days ago" +%Y 2>/dev/null) || return 1
+        month=$(date -d "$days_ago days ago" +%m 2>/dev/null) || return 1
+        day=$(date -d "$days_ago days ago" +%d 2>/dev/null) || return 1
+        echo "$year|$month|$day"
+    fi
+}
+
+# 改进的终止任务函数 - 合并lazykill和lazykillall功能
 kill_job() {
     local target_job="$1"
+    local kill_all=false
+    
+    # 处理帮助参数
+    if [ "$target_job" = "--help" ] || [ "$target_job" = "-h" ]; then
+        cat << 'EOF'
+lazykill - 终止LazyRun任务
+
+用法: lazykill [选项] [任务名]
+
+选项:
+  -a, --all       终止所有任务
+  -h, --help      显示帮助
+
+示例:
+  lazykill train    终止train任务
+  lazykill -a       终止所有任务
+EOF
+        return 0
+    fi
+    
+    # 检查是否是 -a 参数
+    if [ "$target_job" = "-a" ] || [ "$target_job" = "--all" ]; then
+        kill_all=true
+    elif [ -z "$target_job" ]; then
+        print_color red "错误: 请指定要终止的任务名或使用 -a 终止所有任务"
+        print_color blue "使用 'lazylist' 查看活跃任务"
+        print_color blue "使用 'lazykill --help' 查看帮助信息"
+        return 1
+    fi
+    
     local active_file="$LAZYRUN_PID_DIR/active_jobs"
-    local found=false
     
     if [ ! -f "$active_file" ]; then
         print_color red "没有找到活跃的任务"
         return 1
     fi
+    
+    if [ "$kill_all" = true ]; then
+        # 终止所有任务
+        print_color yellow "正在终止所有 LazyRun 任务..."
+        
+        local killed_count=0
+        while IFS=':' read -r pid job_name start_time base_name; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                print_color blue "终止任务: $job_name (PID: $pid)"
+                kill -TERM "$pid" 2>/dev/null
+                ((killed_count++))
+            fi
+        done < "$active_file"
+        
+        if [ $killed_count -eq 0 ]; then
+            print_color yellow "没有找到活跃的任务"
+            return 0
+        fi
+        
+        # 等待优雅终止
+        print_color blue "等待任务优雅退出..."
+        sleep 3
+        
+        # 强制终止仍在运行的进程
+        local force_killed=0
+        while IFS=':' read -r pid job_name start_time base_name; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                print_color yellow "强制终止: $job_name (PID: $pid)"
+                kill -KILL "$pid" 2>/dev/null
+                ((force_killed++))
+            fi
+        done < "$active_file"
+        
+        # 清理文件
+        rm -f "$active_file"
+        rm -f "$LAZYRUN_PID_DIR"/*.pid
+        
+        if [ $force_killed -gt 0 ]; then
+            print_color green "✓ 所有任务已终止 (${killed_count}个正常终止，${force_killed}个强制终止)"
+        else
+            print_color green "✓ 所有${killed_count}个任务已正常终止"
+        fi
+        return 0
+    fi
+    
+    # 终止指定任务
+    local found=false
     
     # 使用智能匹配查找任务
     local matched_job=$(find_matching_job "$target_job")
@@ -623,95 +1132,220 @@ kill_job() {
     mv "$temp_file" "$active_file"
 }
 
-# 终止所有任务
-kill_all_jobs() {
-    local active_file="$LAZYRUN_PID_DIR/active_jobs"
-    
-    if [ ! -f "$active_file" ]; then
-        print_color yellow "没有找到活跃的任务"
-        return
-    fi
-    
-    print_color yellow "正在终止所有 LazyRun 任务..."
-    
-    while IFS=':' read -r pid job_name start_time base_name; do
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            print_color blue "终止任务: $job_name (PID: $pid)"
-            kill -TERM "$pid" 2>/dev/null
-        fi
-    done < "$active_file"
-    
-    # 等待优雅终止
-    sleep 2
-    
-    # 强制终止仍在运行的进程
-    while IFS=':' read -r pid job_name start_time base_name; do
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            print_color yellow "强制终止: $job_name (PID: $pid)"
-            kill -KILL "$pid" 2>/dev/null
-        fi
-    done < "$active_file"
-    
-    # 清理文件
-    rm -f "$active_file"
-    rm -f "$LAZYRUN_PID_DIR"/*.pid
-    
-    print_color green "✓ 所有任务已终止"
-}
-
+# 改进的日志查看函数 - 合并lazylog和lazylogs功能
 view_job_log() {
-    local job_name="$1"
-    local action="${2:-tail}"  # tail, head, cat, follow
+    local search_term="$1"
+    local action="${2:-}"
     
-    if [ -z "$job_name" ]; then
-        print_color red "错误: 请指定任务名称或日志文件名"
-        echo "用法: lazylog <任务名称或日志文件名> [tail|head|cat|follow]"
-        return 1
+    # 处理帮助参数
+    if [ "$search_term" = "--help" ] || [ "$action" = "--help" ]; then
+        cat << 'EOF'
+lazylog - 查看LazyRun日志
+
+用法: lazylog [选项] [任务名] [动作]
+
+选项:
+  -d, --day <天数>    显示指定天数内日志
+  -h, --help          显示帮助
+
+动作:
+  tail         显示最后50行 (默认)
+  cat          编辑器查看完整日志
+  follow       实时跟踪日志
+
+示例:
+  lazylog            交互选择日志
+  lazylog train      查看train任务日志
+  lazylog train cat  编辑器查看
+  lazylog -d 7       显示近7天日志
+  lazylog --day 14   显示近14天日志
+EOF
+        return 0
     fi
     
-    # 使用新的智能匹配查找日志文件
-    local log_file=$(smart_log_search "$job_name")
+    # 如果没有提供搜索词，显示近期日志列表并提供交互选择
+    if [ -z "$search_term" ]; then
+        show_recent_logs_interactive
+        return $?
+    fi
+    
+    # 处理特殊参数
+    case "$search_term" in
+        -d|--day)
+            # -d/--day 参数：显示指定天数的日志
+            local days="${2:-7}"
+            if ! [[ "$days" =~ ^[0-9]+$ ]]; then
+                print_color red "错误: -d/--day 参数后必须跟数字"
+                return 1
+            fi
+            list_logs_by_days "$days"
+            return $?
+            ;;
+        tail|cat|follow)
+            # 如果第一个参数是动作，提示用户
+            print_color red "错误: 请先指定任务名称"
+            print_color blue "用法: lazylog <任务名称> [tail|cat|follow]"
+            return 1
+            ;;
+    esac
+    
+    # 处理动作参数
+    case "$action" in
+        tail|"")
+            action="tail"
+            ;;
+        cat)
+            action="cat"
+            ;;
+        follow)
+            action="follow"
+            ;;
+        -d)
+            # 如果第二个参数是-d，后面应该跟天数
+            local days="${3:-7}"
+            if ! [[ "$days" =~ ^[0-9]+$ ]]; then
+                print_color red "错误: -d 参数后必须跟数字"
+                return 1
+            fi
+            list_logs_by_days "$days" "$search_term"
+            return $?
+            ;;
+        *)
+            if [ -n "$action" ]; then
+                print_color red "错误: 未知的日志查看模式 '$action'"
+                print_color blue "支持的模式: tail, cat, follow"
+                return 1
+            fi
+            ;;
+    esac
+    
+    # 使用智能匹配查找日志文件
+    local log_file=$(smart_log_search "$search_term")
     
     if [ -z "$log_file" ] || [ ! -f "$log_file" ]; then
-        print_color red "未找到匹配的日志文件: $job_name"
+        print_color red "未找到匹配的日志文件: $search_term"
+        print_color blue "使用 'lazylog' (无参数) 查看近期任务并交互选择"
         return 1
     fi
     
     print_color blue "📖 查看日志文件: $(basename "$log_file")"
     print_color green "完整路径: $log_file"
     
+    # 选择编辑器查看日志
     case "$action" in
         tail)
             print_color green "显示最后50行日志:"
             tail -50 "$log_file"
             ;;
-        head)
-            print_color green "显示前50行日志:"
-            head -50 "$log_file"
-            ;;
         cat)
             print_color green "显示完整日志:"
-            cat "$log_file"
+            # 优先使用nano，找不到则使用vim
+            if command -v nano >/dev/null 2>&1; then
+                print_color blue "使用nano查看日志 (Ctrl+X 退出):"
+                nano "$log_file"
+            elif command -v vim >/dev/null 2>&1; then
+                print_color blue "使用vim查看日志 (:q 退出):"
+                vim "$log_file"
+            else
+                print_color yellow "未找到nano或vim，使用cat显示:"
+                cat "$log_file"
+            fi
             ;;
         follow)
             print_color green "实时跟踪日志 (Ctrl+C 退出):"
             tail -f "$log_file"
             ;;
-        *)
-            print_color red "错误: 未知的日志查看模式 '$action'"
-            print_color blue "支持的模式: tail, head, cat, follow"
-            return 1
-            ;;
     esac
 }
 
-# 列出近7天的任务日志
-list_all_logs() {
-    print_color blue "📚 近7天的任务日志:"
+# 显示近期日志并提供交互选择
+show_recent_logs_interactive() {
+    print_color blue "📚 近10个任务日志:"
     
     if [ ! -d "$LAZYRUN_LOG_DIR" ]; then
         print_color yellow "日志目录不存在"
-        return
+        return 1
+    fi
+    
+    # 收集近期日志文件
+    local log_files=()
+    local log_info=()
+    
+    # 查找所有日志文件并按修改时间排序
+    while IFS= read -r -d '' log_file; do
+        if [ -f "$log_file" ]; then
+            log_files+=("$log_file")
+            
+            # 提取文件信息
+            local file_name=$(basename "$log_file")
+            local program_name=$(echo "$file_name" | sed -E 's/_[0-9]{8}_[0-9]{6}(_[0-9]+)?\.log$//')
+            local file_date=""
+            # 从路径中提取日期
+            file_date=$(echo "$log_file" | grep -o '/[0-9]\{4\}/[0-9]\{2\}/[0-9]\{2\}/' | tr -d '/' | sed 's/\(.*\)\(..\)\(..\)/\1-\2-\3/')
+            log_info+=("$program_name ($file_date)")
+        fi
+    done < <(find "$LAZYRUN_LOG_DIR" -name "*.log" -type f -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -10 | tr '\n' '\0')
+    
+    if [ ${#log_files[@]} -eq 0 ]; then
+        print_color yellow "没有找到任何日志文件"
+        return 1
+    fi
+    
+    # 显示选择菜单
+    local i=1
+    for info in "${log_info[@]}"; do
+        printf "  %d) %s\n" "$i" "$info"
+        ((i++))
+    done
+    echo
+    
+    # 交互式选择
+    if [ -t 0 ] && [ -t 1 ]; then
+        printf "请输入序号 (1-%d) 或 'q' 退出: " "${#log_files[@]}"
+        local choice
+        read choice || choice="q"
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#log_files[@]}" ]; then
+            local selected_file="${log_files[$((choice-1))]}"
+            print_color blue "📖 查看日志文件: $(basename "$selected_file")"
+            print_color green "完整路径: $selected_file"
+            
+            # 优先使用nano，找不到则使用vim
+            if command -v nano >/dev/null 2>&1; then
+                print_color blue "使用nano查看日志 (Ctrl+X 退出):"
+                nano "$selected_file"
+            elif command -v vim >/dev/null 2>&1; then
+                print_color blue "使用vim查看日志 (:q 退出):"
+                vim "$selected_file"
+            else
+                print_color yellow "未找到nano或vim，使用less查看:"
+                less "$selected_file"
+            fi
+            return 0
+        elif [ "$choice" = "q" ] || [ "$choice" = "Q" ]; then
+            print_color yellow "用户取消选择"
+            return 1
+        else
+            print_color red "无效的选择: $choice"
+            return 1
+        fi
+    else
+        print_color yellow "非交互式环境，显示最新的日志文件"
+        tail -50 "${log_files[0]}"
+        return 0
+    fi
+}
+
+# 按天数列出日志
+list_logs_by_days() {
+    local days="${1:-7}"
+    local task_filter="${2:-}"
+    
+    print_color blue "📚 近${days}天的任务日志:"
+    
+    if [ ! -d "$LAZYRUN_LOG_DIR" ]; then
+        print_color yellow "日志目录不存在"
+        return 1
     fi
     
     printf "%-12s %-25s %-15s %-25s\n" "日期" "任务名称" "日志文件数" "最新日志"
@@ -719,8 +1353,8 @@ list_all_logs() {
     
     local found_logs=false
     
-    # 遍历近7天
-    for i in {0..6}; do
+    # 遍历指定天数
+    for ((i=0; i<days; i++)); do
         if [[ "$OSTYPE" == "darwin"* ]]; then
             # macOS
             local check_date=$(date -v-${i}d +%Y%m%d)
@@ -748,6 +1382,11 @@ list_all_logs() {
                     local file_name=$(basename "$log_file")
                     # 提取程序名称（日志文件格式：程序名_YYYYMMDD_HHMMSS[_counter].log）
                     local program_name=$(echo "$file_name" | sed -E 's/_[0-9]{8}_[0-9]{6}(_[0-9]+)?\.log$//')
+                    
+                    # 如果指定了任务过滤器，检查是否匹配
+                    if [ -n "$task_filter" ] && [[ "$program_name" != *"$task_filter"* ]]; then
+                        continue
+                    fi
                     
                     # 检查程序是否已经处理过
                     local already_processed=false
@@ -779,7 +1418,12 @@ list_all_logs() {
     done
     
     if [ "$found_logs" = false ]; then
-        print_color yellow "近7天没有找到任何日志文件"
+        if [ -n "$task_filter" ]; then
+            print_color yellow "近${days}天没有找到任务 '${task_filter}' 的日志文件"
+        else
+            print_color yellow "近${days}天没有找到任何日志文件"
+        fi
+        return 1
     fi
 }
 
@@ -815,6 +1459,28 @@ test_pushplus() {
 clean_logs() {
     local days_ago="$1"
     local task_name="$2"
+    
+    # 处理帮助参数
+    if [ "$days_ago" = "--help" ] || [ "$days_ago" = "-h" ]; then
+        cat << 'EOF'
+lazyclean - 清理LazyRun日志
+
+用法: lazyclean [选项] [天数] [任务名]
+
+选项:
+  -h, --help      显示帮助
+
+参数:
+  天数            清理多少天前的日志 (默认: 7)
+  任务名          只清理指定任务的日志 (可选)
+
+示例:
+  lazyclean           清理7天前的所有日志
+  lazyclean 30        清理30天前的所有日志
+  lazyclean 7 train   清理7天前的train任务日志
+EOF
+        return 0
+    fi
     
     # 默认清理7天前的日志
     if [ -z "$days_ago" ]; then
@@ -981,67 +1647,28 @@ clean_logs() {
 # 显示帮助信息
 show_help() {
     cat << EOF
-LazyRun - 智能后台命令执行器
+LazyRun v${LAZYRUN_VERSION} - 后台任务管理器
 
-用法:
-    lazyrun <命令参数...>             - 在后台运行指定命令 (无需引号)
-    
-任务管理命令:
-    lazylist                          - 列出所有活跃任务
-    lazykill <任务名>                 - 终止指定任务
-    lazykillall                       - 终止所有任务
-    
-日志查看命令:
-    lazylog <任务名> [模式]           - 查看任务日志 (支持简称匹配)
-    lazylogfol <任务名>               - 实时跟踪任务日志 (快捷方式)
-    lazylogs                          - 列出近7天的任务日志信息
-    lazyclean [天数] [任务名]         - 清理指定天数前的日志
-    
-其他命令:
-    lazyhelp                          - 显示帮助信息
-    lazypush [token]                  - 测试PushPlus推送功能
+用法: lazyrun [选项] <命令>
 
-日志查看模式:
-    tail     - 显示最后50行 (默认)
-    head     - 显示前50行
-    cat      - 显示完整日志
-    follow   - 实时跟踪日志
+选项:
+  --help, -h     显示帮助
+  --version, -v  显示版本
 
-环境变量:
-    PUSHPLUS_TOKEN                    - PushPlus推送令牌
+子命令:
+  lazylist       列出活跃任务
+  lazylog        查看任务日志  
+  lazykill       终止任务
+  lazypush       测试推送功能
+  lazyclean      清理日志
+
+获取子命令帮助: <子命令> --help
 
 示例:
-    # 后台运行任务 (支持复杂命令和管道)
-    lazyrun python train.py --epochs 100
-    lazyrun make clean && make && ./test
-    lazyrun cat data.txt | grep "error" | sort
-    
-    # 任务管理
-    lazylist                             # 查看活跃任务
-    lazykill python                      # 终止任务 (支持简称，自动选择最新的)
-    lazykillall                          # 终止所有任务
-    
-    # 日志查看 (支持简称匹配)
-    lazylog python                       # 查看最后50行日志
-    lazylog python cat                   # 查看完整日志
-    lazylogfol python                    # 实时跟踪日志 (常用快捷方式)
-    lazylogs                             # 查看近7天任务日志统计
-    
-    # 日志清理
-    lazyclean 7                          # 清理7天前的所有日志
-    lazyclean 30 python                  # 清理python任务30天前的日志
-    lazyclean                            # 清理7天前的日志(默认)
-    
-    # 推送测试
-    lazypush your_token_here             # 测试PushPlus推送功能
-    export PUSHPLUS_TOKEN="your_token"   # 设置推送令牌
-    lazypush                             # 使用环境变量测试推送
-
-配置:
-    日志目录: $LAZYRUN_LOG_DIR (按YYYY-MM-DD/task_name结构存储)
-    PID目录:  $LAZYRUN_PID_DIR
-    最短推送时间: ${MIN_RUN_TIME}秒 (5分钟)
-
+  lazyrun python train.py    启动训练任务
+  lazylist -f                实时监控
+  lazylog train              查看日志
+  lazykill train             终止任务
 EOF
 }
 
@@ -1052,6 +1679,18 @@ main() {
         show_help
         return 1
     fi
+    
+    # 处理标准参数
+    case "$1" in
+        --help|-h)
+            show_help
+            return 0
+            ;;
+        --version|-v)
+            echo "LazyRun v${LAZYRUN_VERSION} (构建于 ${LAZYRUN_BUILD_DATE})"
+            return 0
+            ;;
+    esac
     
     # 运行命令 - 直接传递所有参数，无需引号
     local full_command=""
@@ -1074,46 +1713,17 @@ fi
 
 # 独立的短命令函数
 lazylist() {
-    list_active_jobs
-}
-
-lazylogs() {
-    list_all_logs
+    list_active_jobs "$@"
 }
 
 lazylog() {
-    if [ -z "$1" ]; then
-        print_color red "错误: 请指定要查看的任务名"
-        print_color blue "使用 'lazylogs' 查看所有任务日志"
-        return 1
-    fi
-    view_job_log "$1" "$2"
+    # 新的合并函数，支持所有参数
+    view_job_log "$@"
 }
 
 lazykill() {
-    if [ -z "$1" ]; then
-        print_color red "错误: 请指定要终止的任务名或ID"
-        print_color blue "使用 'lazylist' 查看活跃任务"
-        return 1
-    fi
-    kill_job "$1"
-}
-
-lazykillall() {
-    kill_all_jobs
-}
-
-lazyhelp() {
-    show_help
-}
-
-lazylogfol() {
-    if [ -z "$1" ]; then
-        print_color red "错误: 请指定要查看的任务名"
-        print_color blue "使用 'lazylogs' 查看所有任务日志"
-        return 1
-    fi
-    view_job_log "$1" "follow"
+    # 新的合并函数，支持-a参数
+    kill_job "$@"
 }
 
 lazypush() {
